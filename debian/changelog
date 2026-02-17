@@ -1,3 +1,9 @@
+dtkmultimedia (6.0.4gxde1) UNRELEASED; urgency=medium
+
+  * Merge master
+
+ -- gfdgd_xi <3025613752@qq.com>  Tue, 17 Feb 2026 12:12:20 +0800
+
 dtkmultimedia (6.0.4) unstable; urgency=medium
 
   * chore: [tag]New tag 6.0.4
