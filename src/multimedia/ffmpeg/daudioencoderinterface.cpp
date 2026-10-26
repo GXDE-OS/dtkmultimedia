@@ -301,7 +301,17 @@ bool DAudioEncoderInterface::openOutputAudioCtx()
     d->audioOutCodecCtx->channel_layout = d->d_av_get_default_channel_layout(d->channels);
 #endif
     d->audioOutCodecCtx->sample_rate = d->sampleRate;
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(61, 19, 100)
+    const enum AVSampleFormat *sample_fmts = nullptr;
+    if (avcodec_get_supported_config(d->audioOutCodecCtx, audioOutCodec,
+                                     AV_CODEC_CONFIG_SAMPLE_FORMAT, 0,
+                                     reinterpret_cast<const void **>(&sample_fmts), nullptr) >= 0
+        && sample_fmts) {
+        d->audioOutCodecCtx->sample_fmt = sample_fmts[0];   //for aac , there is AV_SAMPLE_FMT_FLTP =8
+    }
+#else
     d->audioOutCodecCtx->sample_fmt = audioOutCodec->sample_fmts[0];   //for aac , there is AV_SAMPLE_FMT_FLTP =8
+#endif
     d->audioOutCodecCtx->bit_rate = d->bitRateAdaptation();
     d->audioOutCodecCtx->time_base.num = 1;
     d->audioOutCodecCtx->time_base.den = d->audioOutCodecCtx->sample_rate;

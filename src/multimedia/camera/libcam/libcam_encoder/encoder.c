@@ -260,7 +260,17 @@ void /*__attribute__ ((destructor))*/ gviewencoder_fini()
  */
 static int encoder_check_audio_sample_fmt(AVCodec *codec, enum AVSampleFormat sample_fmt)
 {
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(61, 19, 100)
+	const enum AVSampleFormat *p = NULL;
+
+	if (avcodec_get_supported_config(NULL, codec, AV_CODEC_CONFIG_SAMPLE_FORMAT, 0,
+	                                 (const void **) &p, NULL) < 0)
+		return 0;
+	if (!p)
+		return 1;
+#else
 	const enum AVSampleFormat *p = codec->sample_fmts;
+#endif
 
 	while (*p != AV_SAMPLE_FMT_NONE)
 	{
@@ -283,13 +293,19 @@ static int encoder_check_audio_sample_fmt(AVCodec *codec, enum AVSampleFormat sa
  */
 static int select_sample_rate(const AVCodec *codec, int sample_rate)
 {
-	const int *p;
- 	int best_samplerate = 0;
+	const int *p = NULL;
+	int best_samplerate = 0;
 
-	if (!codec->supported_samplerates)
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(61, 19, 100)
+	if (avcodec_get_supported_config(NULL, codec, AV_CODEC_CONFIG_SAMPLE_RATE, 0,
+	                                 (const void **) &p, NULL) < 0 || !p)
 		return sample_rate;
-
+#else
 	p = codec->supported_samplerates;
+	if (!p)
+		return sample_rate;
+#endif
+
 	while (*p) 
 	{
 		if (*p == sample_rate)

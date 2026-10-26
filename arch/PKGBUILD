@@ -1,0 +1,189 @@
+# Maintainer: CharOfString <root@charofstring.cc>
+# SPDX-FileCopyrightText: 2024 - 2026 UnionTech Software Technology Co., Ltd.
+# SPDX-License-Identifier: LGPL-3.0-or-later
+
+pkgbase=dtkmultimedia-git
+pkgname=(dtkmultimedia-git dtkocr-git dtktablerecognizer-git)
+pkgver=6.0.5.r0.gabeb00c
+pkgrel=1
+pkgdesc='Development Tool Kit Multimedia - Deepin multimedia toolkit (Qt 6, local git worktree)'
+arch=('x86_64' 'aarch64' 'loong64')
+url='https://github.com/linuxdeepin/dtkmultimedia'
+license=('LGPL-3.0-or-later')
+
+makedepends=(
+    'git'
+    'cmake'
+    'ninja'
+    'qt6-base'
+    'qt6-multimedia'
+    'qt6-tools'
+    'dtk6core'
+    'dtk6widget'
+    'gstreamer'
+    'gst-plugins-base-libs'
+    'glib2'
+    'ffmpeg'
+    'mpv'
+    'ffmpegthumbnailer'
+    'ncnn'
+    'opencv'
+    'onnxruntime-cpu'
+    'portaudio'
+    'v4l-utils'
+    'libusb'
+    'systemd-libs'
+    'libxtst'
+    'libglvnd'
+)
+
+# Intentionally no source checkout: this is a local-worktree package.
+# build() uses $startdir/.. directly, so uncommitted changes are included.
+source=()
+sha256sums=()
+
+pkgver() {
+    cd "$startdir/.."
+    local ver
+    ver=$(git describe --long --tags --abbrev=7 2>/dev/null) || ver=
+    if [[ -n $ver ]]; then
+        printf '%s' "$ver" | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+    else
+        printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+    fi
+}
+
+prepare() {
+    # Arch does not package opencv_mobile.  Provide a pkg-config shim that
+    # forwards to the installed OpenCV (opencv5 on current Arch, opencv4
+    # fallback) without touching the source tree.
+    local opencv_pc opencv_ver
+    if pkg-config --exists opencv5; then
+        opencv_pc=opencv5
+    elif pkg-config --exists opencv4; then
+        opencv_pc=opencv4
+    else
+        error 'OpenCV pkg-config file (opencv5.pc or opencv4.pc) not found'
+    fi
+    opencv_ver=$(pkg-config --modversion "$opencv_pc")
+
+    mkdir -p "$srcdir/fake-pc"
+    printf 'Name: opencv_mobile\nDescription: OpenCV compatibility shim\nVersion: %s\nRequires: %s\n' \
+        "$opencv_ver" "$opencv_pc" > "$srcdir/fake-pc/opencv_mobile.pc"
+}
+
+build() {
+    export PKG_CONFIG_PATH="$srcdir/fake-pc${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    cmake -S "$startdir/.." -B "$srcdir/build" -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DCMAKE_INSTALL_LIBDIR=lib \
+        -DCMAKE_SKIP_RPATH=ON \
+        -DBUILD_DOCS=OFF \
+        -DBUILD_EXAMPLES=OFF \
+        -DDTK_ENABLE_TABLERECOGNIZER=ON
+    cmake --build "$srcdir/build"
+}
+
+_install() {
+    DESTDIR="$pkgdir" cmake --install "$srcdir/build"
+}
+
+package_dtkmultimedia-git() {
+    pkgdesc='Development Tool Kit Multimedia - Core multimedia and widgets libraries (git)'
+    provides=('dtkmultimedia')
+    conflicts=('dtkmultimedia')
+    depends=(
+        'qt6-base'
+        'qt6-multimedia'
+        'dtk6core'
+        'dtk6widget'
+        'glib2'
+        'gstreamer'
+        'gst-plugins-base-libs'
+        'ffmpeg'
+        'mpv'
+        'ffmpegthumbnailer'
+        'portaudio'
+        'v4l-utils'
+        'libusb'
+        'systemd-libs'
+        'libxtst'
+        'libglvnd'
+    )
+
+    _install
+
+    # Keep only the multimedia + multimediawidgets payload.  The OCR and
+    # table-recognizer files are shipped by their own split packages.
+    rm -rf "$pkgdir"/usr/include/dtk6ocr
+    rm -rf "$pkgdir"/usr/include/dtk6tablerecognizer
+    rm -f  "$pkgdir"/usr/lib/libdtk6ocr.so*
+    rm -f  "$pkgdir"/usr/lib/libdtk6tablerecognizer.so*
+    rm -f  "$pkgdir"/usr/lib/pkgconfig/dtk6ocr.pc
+    rm -f  "$pkgdir"/usr/lib/pkgconfig/dtk6tablerecognizer.pc
+    rm -rf "$pkgdir"/usr/lib/cmake/dtk6ocr
+    rm -rf "$pkgdir"/usr/lib/cmake/dtk6tablerecognizer
+    rm -f  "$pkgdir"/usr/lib/qt6/mkspecs/modules/qt_lib_dtk6ocr.pri
+    rm -f  "$pkgdir"/usr/lib/qt6/mkspecs/modules/qt_lib_dtk6tablerecognizer.pri
+    rm -rf "$pkgdir"/usr/share/libdtk6ocr
+    rm -rf "$pkgdir"/usr/share/libdtk6tablerecognizer
+}
+
+package_dtkocr-git() {
+    pkgdesc='Development Tool Kit OCR - OCR abstraction layer (git)'
+    provides=('dtkocr')
+    conflicts=('dtkocr')
+    depends=(
+        'qt6-base'
+        'ncnn'
+        'opencv'
+        'libgomp'
+    )
+
+    _install
+
+    # Keep only the OCR payload.
+    rm -rf "$pkgdir"/usr/include/dtk6multimedia
+    rm -rf "$pkgdir"/usr/include/dtk6multimediawidgets
+    rm -rf "$pkgdir"/usr/include/dtk6tablerecognizer
+    rm -f  "$pkgdir"/usr/lib/libdtk6multimedia.so*
+    rm -f  "$pkgdir"/usr/lib/libdtk6multimediawidgets.so*
+    rm -f  "$pkgdir"/usr/lib/libdtk6tablerecognizer.so*
+    rm -f  "$pkgdir"/usr/lib/pkgconfig/dtk6multimedia.pc
+    rm -f  "$pkgdir"/usr/lib/pkgconfig/dtk6tablerecognizer.pc
+    rm -rf "$pkgdir"/usr/lib/cmake/dtk6multimedia
+    rm -rf "$pkgdir"/usr/lib/cmake/dtk6tablerecognizer
+    rm -f  "$pkgdir"/usr/lib/qt6/mkspecs/modules/qt_lib_dtk6multimedia.pri
+    rm -f  "$pkgdir"/usr/lib/qt6/mkspecs/modules/qt_lib_dtk6tablerecognizer.pri
+    rm -rf "$pkgdir"/usr/share/libdtk6tablerecognizer
+}
+
+package_dtktablerecognizer-git() {
+    pkgdesc='Development Tool Kit Table Recognizer - Table structure detection and recognition (git)'
+    provides=('dtktablerecognizer')
+    conflicts=('dtktablerecognizer')
+    depends=(
+        'qt6-base'
+        'dtkocr-git'
+        'onnxruntime-cpu'
+        'opencv'
+    )
+
+    _install
+
+    # Keep only the table-recognizer payload.
+    rm -rf "$pkgdir"/usr/include/dtk6multimedia
+    rm -rf "$pkgdir"/usr/include/dtk6multimediawidgets
+    rm -rf "$pkgdir"/usr/include/dtk6ocr
+    rm -f  "$pkgdir"/usr/lib/libdtk6multimedia.so*
+    rm -f  "$pkgdir"/usr/lib/libdtk6multimediawidgets.so*
+    rm -f  "$pkgdir"/usr/lib/libdtk6ocr.so*
+    rm -f  "$pkgdir"/usr/lib/pkgconfig/dtk6multimedia.pc
+    rm -f  "$pkgdir"/usr/lib/pkgconfig/dtk6ocr.pc
+    rm -rf "$pkgdir"/usr/lib/cmake/dtk6multimedia
+    rm -rf "$pkgdir"/usr/lib/cmake/dtk6ocr
+    rm -f  "$pkgdir"/usr/lib/qt6/mkspecs/modules/qt_lib_dtk6multimedia.pri
+    rm -f  "$pkgdir"/usr/lib/qt6/mkspecs/modules/qt_lib_dtk6ocr.pri
+    rm -rf "$pkgdir"/usr/share/libdtk6ocr
+}

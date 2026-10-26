@@ -346,11 +346,13 @@ void PaddleOCRAppV5::rec(const std::vector<cv::Mat> &detectImg)
         input.substract_mean_normalize(mean_vals, norm_vals);
         auto outIndexes = recNet->output_indexes();
         ncnn::Extractor extractor = recNet->create_extractor();
+#if NCNN_VERSION_NUMBER < 20250916
         if (recNet->opt.use_vulkan_compute) {
             if (maxThreadsUsed > 1 && i % maxThreadsUsed != 1) {
                 extractor.set_vulkan_compute(false);
             }
         }
+#endif
 
         extractor.input(0, input);
         ncnn::Mat out;
