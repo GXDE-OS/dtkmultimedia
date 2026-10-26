@@ -3,13 +3,31 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 
 pkgbase=dtkmultimedia-git
-pkgname=(dtkmultimedia-git dtkocr-git dtktablerecognizer-git)
-pkgver=6.0.5.r0.gabeb00c
+pkgver=6.0.5.arch1.r0.gda029d5
 pkgrel=1
 pkgdesc='Development Tool Kit Multimedia - Deepin multimedia toolkit (Qt 6, local git worktree)'
 arch=('x86_64' 'aarch64' 'loong64')
 url='https://github.com/linuxdeepin/dtkmultimedia'
 license=('LGPL-3.0-or-later')
+
+# x86_64 uses the official extra/onnxruntime-cpu.  aarch64 uses the GXDE
+# onnxruntime-cpu-bin package.  Other architectures skip tablerecognizer
+# unless explicitly enabled.
+case $CARCH in
+    x86_64|aarch64) _with_tablerecognizer=${DTKMM_WITH_TABLERECOGNIZER:-1} ;;
+    *) _with_tablerecognizer=${DTKMM_WITH_TABLERECOGNIZER:-0} ;;
+esac
+
+if [[ $CARCH == aarch64 ]]; then
+    _onnxruntime_pkg=onnxruntime-cpu-bin
+else
+    _onnxruntime_pkg=onnxruntime-cpu
+fi
+
+pkgname=(dtkmultimedia-git dtkocr-git)
+if (( _with_tablerecognizer )); then
+    pkgname+=(dtktablerecognizer-git)
+fi
 
 makedepends=(
     'git'
@@ -28,7 +46,6 @@ makedepends=(
     'ffmpegthumbnailer'
     'ncnn'
     'opencv'
-    'onnxruntime-cpu'
     'portaudio'
     'v4l-utils'
     'libusb'
@@ -36,6 +53,9 @@ makedepends=(
     'libxtst'
     'libglvnd'
 )
+if (( _with_tablerecognizer )); then
+    makedepends+=("$_onnxruntime_pkg")
+fi
 
 # Intentionally no source checkout: this is a local-worktree package.
 # build() uses $startdir/.. directly, so uncommitted changes are included.
@@ -73,6 +93,11 @@ prepare() {
 }
 
 build() {
+    local tablerec=OFF
+    if (( _with_tablerecognizer )); then
+        tablerec=ON
+    fi
+
     export PKG_CONFIG_PATH="$srcdir/fake-pc${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
     cmake -S "$startdir/.." -B "$srcdir/build" -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
@@ -81,7 +106,7 @@ build() {
         -DCMAKE_SKIP_RPATH=ON \
         -DBUILD_DOCS=OFF \
         -DBUILD_EXAMPLES=OFF \
-        -DDTK_ENABLE_TABLERECOGNIZER=ON
+        -DDTK_ENABLE_TABLERECOGNIZER=$tablerec
     cmake --build "$srcdir/build"
 }
 
@@ -166,7 +191,7 @@ package_dtktablerecognizer-git() {
     depends=(
         'qt6-base'
         'dtkocr-git'
-        'onnxruntime-cpu'
+        "$_onnxruntime_pkg"
         'opencv'
     )
 
