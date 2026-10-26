@@ -11,6 +11,7 @@ set(BIN_NAME ut-dtkmultimedia)
 include(./dbus/fakeInterface.cmake)
 
 file(GLOB_RECURSE INCLUDE_FILES "../include/*.h")
+list(FILTER INCLUDE_FILES EXCLUDE REGEX "dtktablerecognizer")
 file(GLOB_RECURSE SRCS
     "../src/multimediawidgets/*.h"
     "../src/multimediawidgets/*.cpp"
@@ -19,6 +20,10 @@ file(GLOB_RECURSE SRCS
     "${INCLUDE_FILES}"
     )
 file(GLOB_RECURSE TEST_FILES "./*.h" "./*.cpp")
+
+# Phase 0/Phase 1 表格识别单测由独立的 ut-tablerecognizer 目标构建（见文件末尾），
+# 从 ut-dtkmultimedia glob 中剔除，避免在未编译 tablerecognizer 源码时产生未定义符号。
+list(FILTER TEST_FILES EXCLUDE REGEX "ut_ortinferenceengine|ut_tablestructuredetector|ut_dtablerecognizer|ut_img2tablefallback|ut_htmltablebuilder|ut_celltextmapper|ut_wirelesstableheuristic|ut_tableerrorutils|benchmarks")
 
 include_directories(
     "../include/dtkmultimedia"
@@ -132,3 +137,52 @@ ADD_DEFINITIONS(-DOCR_MODEL_DIR="${CMAKE_CURRENT_LIST_DIR}/../src/ocr/${ModelSav
 add_subdirectory(ocrplugin)
 
 add_test(NAME ${BIN_NAME} COMMAND ${BIN_NAME})
+
+
+# ===== Phase 0 + Phase 1: 表格识别单元测试（独立可验证子集）=====
+# 门控 dtk6tablerecognizer 目标（即 onnxruntime 可用）；接入全部 6 个 tablerecognizer 单测。
+if(TARGET dtk${DTK_VERSION_MAJOR}tablerecognizer)
+    set(UT_TR_NAME ut-tablerecognizer)
+    # 表格识别单测依赖 Qt 事件循环：DTableResult 经 QueuedConnection 投递，
+    # QSignalSpy::wait() 需要事件循环，否则等待不会超时（挂死）。
+    # 故与 ut-dtkmultimedia 一致，使用 tests/main.cpp 提供的 QApplication main，
+    # 而不使用 gtest_main。
+    add_executable(${UT_TR_NAME}
+        main.cpp
+        ut_ortinferenceengine.cpp
+        ut_tablestructuredetector.cpp
+        ut_dtablerecognizer.cpp
+        ut_img2tablefallback.cpp
+        ut_htmltablebuilder.cpp
+        ut_celltextmapper.cpp
+        ut_wirelesstableheuristic.cpp
+        ut_tableerrorutils.cpp
+        3rdparty/stub-ext/stub-shadow.cpp)
+    target_include_directories(${UT_TR_NAME} PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/../src/tablerecognizer
+        ${CMAKE_CURRENT_LIST_DIR}/../include/dtktablerecognizer
+        ${CMAKE_CURRENT_LIST_DIR}/3rdparty/cpp-stub
+        ${CMAKE_CURRENT_LIST_DIR}/3rdparty/stub-ext)
+    find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Test)
+    find_package(GTest)
+    if(GTest_FOUND)
+        set(UT_TR_GTEST GTest::gtest)
+    else()
+        set(UT_TR_GTEST gtest)
+    endif()
+    target_link_libraries(${UT_TR_NAME} PRIVATE
+        dtk${DTK_VERSION_MAJOR}tablerecognizer
+        Qt${QT_VERSION_MAJOR}::Core
+        Qt${QT_VERSION_MAJOR}::Gui
+        Qt${QT_VERSION_MAJOR}::Widgets
+        Qt${QT_VERSION_MAJOR}::Concurrent
+        Qt${QT_VERSION_MAJOR}::Test
+        ${UT_TR_GTEST}
+        pthread)
+    add_test(NAME ${UT_TR_NAME} COMMAND ${UT_TR_NAME})
+else()
+    message(STATUS "ut-tablerecognizer skipped: dtk${DTK_VERSION_MAJOR}tablerecognizer not built (onnxruntime unavailable)")
+endif()
+
+# Phase 0 TEDS 基准 harness（验证/记录工具）。
+add_subdirectory(benchmarks)

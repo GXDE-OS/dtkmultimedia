@@ -1,0 +1,511 @@
+// SPDX-FileCopyrightText: 2026 UnionTech Software Technology Co., Ltd.
+//
+// SPDX-License-Identifier: LGPL-3.0-or-later
+
+#include "TableStructureDetector.h"
+
+#include "TableErrorUtils.h"
+
+#include "OrtInferenceEngine.h"
+
+#include <QDebug>
+#include <algorithm>
+#include <cmath>
+#include <QMap>
+#include <QString>
+
+D_TABLERECOGNIZER_BEGIN_NAMESPACE
+
+namespace {
+
+// SLANet_plus 结构词表（50 tokens）。
+// 词表顺序与 PaddleOCR TableLabelDecode.add_special_char 一致：
+//   [sos] + character_dict (48 entries) + [eos]
+// character_dict 从 ONNX 模型元数据 character 字段提取。
+const QStringList &vocab()
+{
+    static const QStringList v = {
+        QStringLiteral("<sos>"),           // 0  — 序列起始（PaddleOCR beg_str）
+        QStringLiteral("<thead>"),         // 1
+        QStringLiteral("</thead>"),        // 2
+        QStringLiteral("<tbody>"),         // 3
+        QStringLiteral("</tbody>"),        // 4
+        QStringLiteral("<tr>"),            // 5
+        QStringLiteral("</tr>"),           // 6
+        QStringLiteral("<td"),             // 7  — 单元格起始（需 > 闭合）
+        QStringLiteral(">"),               // 8  — 闭合单元格属性
+        QStringLiteral("</td>"),           // 9
+        QStringLiteral(" colspan=\"2\""),  // 10
+        QStringLiteral(" colspan=\"3\""),  // 11
+        QStringLiteral(" colspan=\"4\""),  // 12
+        QStringLiteral(" colspan=\"5\""),  // 13
+        QStringLiteral(" colspan=\"6\""),  // 14
+        QStringLiteral(" colspan=\"7\""),  // 15
+        QStringLiteral(" colspan=\"8\""),  // 16
+        QStringLiteral(" colspan=\"9\""),  // 17
+        QStringLiteral(" colspan=\"10\""), // 18
+        QStringLiteral(" colspan=\"11\""), // 19
+        QStringLiteral(" colspan=\"12\""), // 20
+        QStringLiteral(" colspan=\"13\""), // 21
+        QStringLiteral(" colspan=\"14\""), // 22
+        QStringLiteral(" colspan=\"15\""), // 23
+        QStringLiteral(" colspan=\"16\""), // 24
+        QStringLiteral(" colspan=\"17\""), // 25
+        QStringLiteral(" colspan=\"18\""), // 26
+        QStringLiteral(" colspan=\"19\""), // 27
+        QStringLiteral(" colspan=\"20\""), // 28
+        QStringLiteral(" rowspan=\"2\""),  // 29
+        QStringLiteral(" rowspan=\"3\""),  // 30
+        QStringLiteral(" rowspan=\"4\""),  // 31
+        QStringLiteral(" rowspan=\"5\""),  // 32
+        QStringLiteral(" rowspan=\"6\""),  // 33
+        QStringLiteral(" rowspan=\"7\""),  // 34
+        QStringLiteral(" rowspan=\"8\""),  // 35
+        QStringLiteral(" rowspan=\"9\""),  // 36
+        QStringLiteral(" rowspan=\"10\""), // 37
+        QStringLiteral(" rowspan=\"11\""), // 38
+        QStringLiteral(" rowspan=\"12\""), // 39
+        QStringLiteral(" rowspan=\"13\""), // 40
+        QStringLiteral(" rowspan=\"14\""), // 41
+        QStringLiteral(" rowspan=\"15\""), // 42
+        QStringLiteral(" rowspan=\"16\""), // 43
+        QStringLiteral(" rowspan=\"17\""), // 44
+        QStringLiteral(" rowspan=\"18\""), // 45
+        QStringLiteral(" rowspan=\"19\""), // 46
+        QStringLiteral(" rowspan=\"20\""), // 47
+        QStringLiteral("<td></td>"),       // 48 — 自闭合空单元格
+        QStringLiteral("<eos>"),           // 49 — 序列结束（PaddleOCR end_str）
+    };
+    return v;
+}
+
+// colspan token id → span 值（id 10..28 → span 2..20）。
+inline int colspanFromId(int id) { return id - 8; }
+// rowspan token id → span 值（id 29..47 → span 2..20）。
+inline int rowspanFromId(int id) { return id - 27; }
+
+// 单元格起始 token id 集合：<td (7) 和 <td></td> (48)。
+inline bool isCellToken(int id) { return id == 7 || id == 48; }
+
+} // namespace
+
+QStringList TableStructureDetector::vocabulary()
+{
+    return vocab();
+}
+
+TableStructureDetector::TableStructureDetector(OrtInferenceEngine *engine)
+    : m_engine(engine)
+{
+}
+
+TableStructureDetector::~TableStructureDetector() = default;
+
+bool TableStructureDetector::available() const
+{
+    return m_engine && m_engine->isLoaded();
+}
+
+bool TableStructureDetector::detect(const QImage &image, QList<DetectedCell> &cells, QString &error,
+                                       float *confidence)
+{
+    cells.clear();
+    m_failure = Failure::None;
+    if (!available()) {
+        m_failure = Failure::Unavailable;
+        error = TableErrorUtils::detail(QStringLiteral("slanet"),
+                                        QStringLiteral("unavailable: ORT model not loaded"));
+        return false;
+    }
+    if (image.isNull()) {
+        m_failure = Failure::InvalidImage;
+        error = TableErrorUtils::detail(QStringLiteral("slanet"),
+                                        QStringLiteral("invalid input image"),
+                                        {{QStringLiteral("image"), QStringLiteral("null")}});
+        return false;
+    }
+
+    constexpr int kInputSize = 488;
+    std::vector<float> input = preprocess(image, kInputSize);
+    if (input.empty()) {
+        m_failure = Failure::PreprocessFailed;
+        error = TableErrorUtils::detail(
+            QStringLiteral("slanet"), QStringLiteral("image preprocessing failed"),
+            {{QStringLiteral("image"), QStringLiteral("%1x%2").arg(image.width()).arg(image.height())},
+             {QStringLiteral("input_size"), QString::number(kInputSize)}});
+        return false;
+    }
+
+    const std::vector<int64_t> shape = {1, 3, kInputSize, kInputSize};
+    std::vector<std::vector<int64_t>> outShapes;
+    std::vector<std::vector<float>> outputs = m_engine->run(input, shape, &outShapes);
+    if (outputs.empty()) {
+        m_failure = Failure::InferenceFailed;
+        const QString engineError = m_engine->lastError();
+        error = TableErrorUtils::detail(
+            QStringLiteral("slanet"), QStringLiteral("ORT inference produced no output"),
+            {{QStringLiteral("engine_error"), engineError.isEmpty() ? QStringLiteral("none") : engineError},
+             {QStringLiteral("engine_failure"), QString::number(static_cast<int>(m_engine->lastFailure()))}});
+        return false;
+    }
+    if (outputs.size() < 2) {
+        m_failure = Failure::BadOutput;
+        error = TableErrorUtils::detail(
+            QStringLiteral("slanet"), QStringLiteral("ORT output nodes are not enough"),
+            {{QStringLiteral("nodes"), QString::number(outputs.size())},
+             {QStringLiteral("expect"), QStringLiteral(">=2")}});
+        return false;
+    }
+
+    // 模型有 2 个输出。SLANet_plus 导出顺序为 [bbox(8), structure(50)]，
+    // 但不能硬编码顺序——通过输出最后一维大小判断：V（词表）较大者为结构输出。
+    int structIdx = 1;
+    int bboxIdx = 0;
+    if (outShapes.size() >= 2) {
+        const int64_t v0 = outShapes[0].empty() ? 0 : outShapes[0].back();
+        const int64_t v1 = outShapes[1].empty() ? 0 : outShapes[1].back();
+        if (v0 > v1) {
+            structIdx = 0;
+            bboxIdx = 1;
+        }
+    }
+    const auto &structOut = outputs[structIdx];
+    const auto &bboxOut = outputs[bboxIdx];
+
+    // V 从结构输出的实际形状获取（最后一维）。
+    int V = 0;
+    size_t T = 0;
+    if (outShapes.size() > size_t(structIdx) && outShapes[structIdx].size() >= 2) {
+        V = static_cast<int>(outShapes[structIdx].back());
+        const int64_t total = static_cast<int64_t>(structOut.size());
+        if (V > 0 && total % V == 0)
+            T = total / V;
+    }
+    // 退回按词表大小推断。
+    if (V <= 0 || T == 0) {
+        V = vocab().size();
+        if (V > 0 && structOut.size() % size_t(V) == 0)
+            T = structOut.size() / size_t(V);
+    }
+
+    // bbox stride 从 bbox 输出形状获取（最后一维，通常 8）。
+    int bboxStride = 4;
+    if (outShapes.size() > size_t(bboxIdx) && outShapes[bboxIdx].size() >= 2) {
+        const int s = static_cast<int>(outShapes[bboxIdx].back());
+        if (s > 0)
+            bboxStride = s;
+    }
+
+    // 判断 bbox 是否按时间步排列（PaddleOCR SLANet 中 bbox 输出与结构序列等长）。
+    bool bboxPerTimeStep = false;
+    if (T > 0 && bboxStride > 0) {
+        const size_t bboxCount = bboxOut.size() / size_t(bboxStride);
+        bboxPerTimeStep = (bboxCount == T);
+    }
+
+    // 结构 token：按 [T, V] 逐时间步 argmax。
+    std::vector<int> structIds;
+    if (V > 0 && T > 0) {
+        for (size_t t = 0; t < T; ++t) {
+            const float *row = structOut.data() + t * V;
+            int best = 0;
+            float bestVal = row[0];
+            for (int v = 1; v < V; ++v) {
+                if (row[v] > bestVal) {
+                    bestVal = row[v];
+                    best = v;
+                }
+            }
+            structIds.push_back(best);
+        }
+    } else {
+        qWarning() << "TableStructureDetector: cannot determine V from output shape, "
+                   << "structOut size =" << structOut.size() << "V =" << V;
+        m_failure = Failure::BadOutput;
+        error = TableErrorUtils::detail(
+            QStringLiteral("slanet"), QStringLiteral("failed to parse structure output shape"),
+            {{QStringLiteral("struct_out"), QString::number(structOut.size())},
+             {QStringLiteral("V"), QString::number(V)}});
+        return false;
+    }
+
+    // 遇到 <eos>（id=49）提前截断（SLANet 输出含填充）。
+    const int eosId = 49;
+    auto eosIt = std::find(structIds.begin(), structIds.end(), eosId);
+    if (eosIt != structIds.end())
+        structIds.erase(eosIt + 1, structIds.end());
+
+    // M1：在 argmax 后计算结构 token 的 softmax 均值置信度，供 runPipeline 门控。
+    if (confidence)
+        *confidence = meanMaxConfidence(structOut, V, static_cast<int>(T), structIds);
+
+    cells = decodeStructure(structIds, bboxOut, image.size(), bboxStride, bboxPerTimeStep);
+    if (cells.isEmpty()) {
+        qWarning() << "TableStructureDetector: decodeStructure returned 0 cells."
+                   << "structIds count =" << structIds.size()
+                   << "bboxOut count =" << bboxOut.size()
+                   << "V =" << V << "T =" << T << "bboxStride =" << bboxStride
+                   << "bboxPerTimeStep =" << bboxPerTimeStep
+                   << "structIdx =" << structIdx << "bboxIdx =" << bboxIdx;
+        // 打印前 50 个 token id 辅助排查。
+        QString idsStr;
+        for (size_t i = 0; i < structIds.size() && i < 50; ++i)
+            idsStr += QString::number(structIds[i]) + QLatin1Char(' ');
+        qWarning() << "TableStructureDetector: first 50 structIds:" << idsStr;
+        m_failure = Failure::NoStructure;
+        error = TableErrorUtils::detail(
+            QStringLiteral("slanet"), QStringLiteral("no table detected"),
+            {{QStringLiteral("tokens"), QString::number(structIds.size())},
+             {QStringLiteral("cells"), QStringLiteral("0")},
+             {QStringLiteral("V"), QString::number(V)},
+             {QStringLiteral("T"), QString::number(T)}});
+        return false;
+    }
+    return true;
+}
+
+TableStructureDetector::Failure TableStructureDetector::lastFailure() const
+{
+    return m_failure;
+}
+
+float TableStructureDetector::meanMaxConfidence(const std::vector<float> &logits, int V, int T,
+                                           const std::vector<int> &ids)
+{
+    if (V <= 0 || T <= 0 || logits.empty())
+        return 0.0f;
+    // 有效时间步取 min(T, ids.size())，与 argmax 序列实际长度对齐。
+    const size_t steps = std::min<size_t>(static_cast<size_t>(T), ids.size());
+    if (steps == 0)
+        return 0.0f;
+
+    // 输出类型自适应（通用，防未来换模型）：探测首步行是否已是概率分布——
+    // 值全在 [0,1] 且行和 ≈ 1 → 视为概率，直接取 row[argmax] 作为置信度（概率直读）；
+    // 否则视为原始 logits → 做 softmax 再取概率。
+    // SLANet_plus ONNX 图内含 1 个 Softmax 算子，结构输出本身即概率——
+    // 若再做 softmax（双重 softmax）会把真实 0.9993 压成 ~0.0525，导致置信度无判别力。
+    bool isProbability = false;
+    {
+        const float *firstRow = logits.data();
+        double rowSum = 0.0;
+        bool allInRange = true;
+        for (int v = 0; v < V; ++v) {
+            const double val = static_cast<double>(firstRow[v]);
+            if (val < -1e-4 || val > 1.0 + 1e-4) {
+                allInRange = false;
+                break;
+            }
+            rowSum += val;
+        }
+        if (allInRange && std::abs(rowSum - 1.0) < 0.01)
+            isProbability = true;
+    }
+
+    double sum = 0.0;
+    size_t counted = 0;
+    for (size_t t = 0; t < steps; ++t) {
+        const float *row = logits.data() + t * static_cast<size_t>(V);
+        const int id = ids[t];
+        if (id < 0 || id >= V)
+            continue;   // 越界时间步不计入均值。
+
+        if (isProbability) {
+            // 概率直读：row[argmax] 即该步置信度（与 PaddleOCR preds.max(axis=2) 一致）。
+            sum += static_cast<double>(row[id]);
+            ++counted;
+        } else {
+            // 原始 logits → 数值稳定 softmax。
+            float maxLogit = row[0];
+            for (int v = 1; v < V; ++v)
+                maxLogit = std::max(maxLogit, row[v]);
+            double expSum = 0.0;
+            for (int v = 0; v < V; ++v)
+                expSum += std::exp(static_cast<double>(row[v]) - static_cast<double>(maxLogit));
+            if (expSum <= 0.0)
+                continue;
+            sum += std::exp(static_cast<double>(row[id]) - static_cast<double>(maxLogit)) / expSum;
+            ++counted;
+        }
+    }
+    if (counted == 0)
+        return 0.0f;
+    return static_cast<float>(sum / static_cast<double>(counted));
+}
+
+std::vector<float> TableStructureDetector::preprocess(const QImage &image, int inputSize)
+{
+    if (image.isNull() || inputSize <= 0)
+        return {};
+
+    QImage scaled = image.scaled(inputSize, inputSize, Qt::IgnoreAspectRatio,
+                                 Qt::SmoothTransformation)
+                        .convertToFormat(QImage::Format_RGB888);
+    if (scaled.isNull())
+        return {};
+
+    constexpr float mean[3] = {0.485f, 0.456f, 0.406f};
+    constexpr float std[3] = {0.229f, 0.224f, 0.225f};
+
+    const int bytesPerLine = scaled.bytesPerLine();
+    const uchar *bits = scaled.constBits();
+    std::vector<float> tensor(static_cast<size_t>(3) * inputSize * inputSize, 0.0f);
+    const size_t planeSize = static_cast<size_t>(inputSize) * inputSize;
+
+    for (int y = 0; y < inputSize; ++y) {
+        const uchar *line = bits + size_t(y) * bytesPerLine;
+        for (int x = 0; x < inputSize; ++x) {
+            const int base = x * 3;
+            const float r = line[base] / 255.0f;
+            const float g = line[base + 1] / 255.0f;
+            const float b = line[base + 2] / 255.0f;
+            tensor[y * inputSize + x] = (r - mean[0]) / std[0];
+            tensor[planeSize + y * inputSize + x] = (g - mean[1]) / std[1];
+            tensor[2 * planeSize + y * inputSize + x] = (b - mean[2]) / std[2];
+        }
+    }
+    return tensor;
+}
+
+QList<DetectedCell> TableStructureDetector::decodeStructure(const std::vector<int> &structureIds,
+                                                            const std::vector<float> &bboxes,
+                                                            const QSize &imageSize,
+                                                            int bboxStride,
+                                                            bool bboxPerTimeStep)
+{
+    const QStringList &v = vocab();
+    const int V = v.size();
+    if (bboxStride < 4)
+        bboxStride = 4;
+
+    QList<DetectedCell> cells;
+    int row = 0;
+    int col = 0;
+    // spanRows[c] = 该列还被上方 rowspan 占用的行数。
+    // 设为 rowSpan（而非 rowSpan-1），因为 advanceRow 会递减一次：
+    // 若 rowSpan=2，emitCell 设 spanRows[c]=2，advanceRow 后变为 1（下一行仍被占用），
+    // 再 advanceRow 后变为 0（释放）。这保证跨行单元格在所有占用行中都被跳过。
+    QMap<int, int> spanRows;
+    int cellIndex = 0;       // 单元格计数器（当 bbox 非按时间步排列时使用）
+    bool inTd = false;       // 正在累积 <td ...> 属性
+    int pendingColSpan = 1;
+    int pendingRowSpan = 1;
+
+    auto advanceRow = [&]() {
+        // 行结束：递减各列的 rowspan 占用计数。
+        for (int c : spanRows.keys()) {
+            int left = spanRows[c] - 1;
+            if (left <= 0)
+                spanRows.remove(c);
+            else
+                spanRows[c] = left;
+        }
+        ++row;
+        col = 0;
+    };
+
+    auto emitCell = [&](int rowSpan, int colSpan, int timeStep) {
+        // 跳过被上方 rowspan 覆盖的列。
+        while (spanRows.value(col, 0) > 0)
+            ++col;
+        const int startCol = col;
+
+        DetectedCell cell;
+        cell.row = row;
+        cell.col = startCol;
+        cell.rowSpan = rowSpan;
+        cell.colSpan = colSpan;
+
+        // bbox 索引：若按时间步排列则用 timeStep，否则用 cellIndex。
+        const int bboxIdxVal = bboxPerTimeStep ? timeStep : cellIndex;
+        if (bboxIdxVal >= 0 && size_t(bboxIdxVal + 1) * size_t(bboxStride) <= bboxes.size()) {
+            const size_t bi = size_t(bboxIdxVal) * size_t(bboxStride);
+            if (bboxStride >= 8) {
+                // 4 多边形顶点: (x1,y1),(x2,y2),(x3,y3),(x4,y4)
+                float xs[4] = {bboxes[bi], bboxes[bi + 2], bboxes[bi + 4], bboxes[bi + 6]};
+                float ys[4] = {bboxes[bi + 1], bboxes[bi + 3], bboxes[bi + 5], bboxes[bi + 7]};
+                const float xmin = *std::min_element(xs, xs + 4);
+                const float ymin = *std::min_element(ys, ys + 4);
+                const float xmax = *std::max_element(xs, xs + 4);
+                const float ymax = *std::max_element(ys, ys + 4);
+                cell.bbox = QRectF(QPointF(xmin, ymin), QPointF(xmax, ymax));
+            } else {
+                cell.bbox = QRectF(QPointF(bboxes[bi], bboxes[bi + 1]),
+                                   QPointF(bboxes[bi + 2], bboxes[bi + 3]));
+            }
+        }
+        cells.append(cell);
+
+        for (int c = startCol; c < startCol + colSpan; ++c) {
+            if (rowSpan > 1)
+                spanRows[c] = rowSpan;  // 设置占用行数（含当前行）
+            else
+                spanRows.remove(c);
+        }
+        col += colSpan;
+        ++cellIndex;
+    };
+
+    for (size_t i = 0; i < structureIds.size(); ++i) {
+        const int id = structureIds[i];
+        if (id < 0 || id >= V)
+            continue;
+        const QString &tok = v.at(id);
+
+        if (inTd) {
+            // 累积属性直到 ">" 闭合。
+            if (tok == QStringLiteral(">")) {
+                emitCell(pendingRowSpan, pendingColSpan, int(i));
+                pendingColSpan = 1;
+                pendingRowSpan = 1;
+                inTd = false;
+            } else if (tok == QStringLiteral("</td>")) {
+                // 容错：属性未闭合但遇到 </td>，按已收集属性闭合。
+                emitCell(pendingRowSpan, pendingColSpan, int(i));
+                pendingColSpan = 1;
+                pendingRowSpan = 1;
+                inTd = false;
+            } else if (id >= 10 && id <= 28) {
+                // colspan：span = id - 8（colspanFromId）
+                pendingColSpan = colspanFromId(id);
+            } else if (id >= 29 && id <= 47) {
+                // rowspan：span = id - 27（rowspanFromId）
+                pendingRowSpan = rowspanFromId(id);
+            }
+            continue;
+        }
+
+        if (tok == QStringLiteral("<tr>")) {
+            // 新行开始。
+        } else if (tok == QStringLiteral("</tr>")) {
+            advanceRow();
+        } else if (tok == QStringLiteral("<td")) {
+            inTd = true;
+            pendingColSpan = 1;
+            pendingRowSpan = 1;
+        } else if (tok == QStringLiteral("<td></td>")) {
+            // 自闭合空单元格。
+            emitCell(1, 1, int(i));
+        }
+        // 其它 token（<sos>/<eos>/<thead>/</thead>/<tbody>/</tbody>/</td>）忽略。
+    }
+
+    // 容错：流结束时仍在累积属性，按已收集属性闭合。
+    if (inTd) {
+        emitCell(pendingRowSpan, pendingColSpan, int(structureIds.size() - 1));
+    }
+
+    // 归一化 bbox（0~1）缩放到原图尺寸。
+    for (DetectedCell &cell : cells) {
+        if (imageSize.width() > 0 && imageSize.height() > 0) {
+            const QRectF nb = cell.bbox;
+            cell.bbox = QRectF(QPointF(nb.left() * imageSize.width(),
+                                       nb.top() * imageSize.height()),
+                               QPointF(nb.right() * imageSize.width(),
+                                       nb.bottom() * imageSize.height()));
+        }
+    }
+
+    return cells;
+}
+
+D_TABLERECOGNIZER_END_NAMESPACE
