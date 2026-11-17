@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2024 - 2026 UnionTech Software Technology Co., Ltd.
 # SPDX-License-Identifier: LGPL-3.0-or-later
 
-pkgbase=dtkmultimedia-git
+pkgbase=dtkmultimedia
 pkgver=6.0.5.arch1.r0.gda029d5
 pkgrel=1
 pkgdesc='Development Tool Kit Multimedia - Deepin multimedia toolkit (Qt 6, local git worktree)'
@@ -24,9 +24,9 @@ else
     _onnxruntime_pkg=onnxruntime-cpu
 fi
 
-pkgname=(dtkmultimedia-git dtkocr-git)
+pkgname=(dtkmultimedia dtkocr)
 if (( _with_tablerecognizer )); then
-    pkgname+=(dtktablerecognizer-git)
+    pkgname+=(dtktablerecognizer)
 fi
 
 makedepends=(
@@ -114,10 +114,11 @@ _install() {
     DESTDIR="$pkgdir" cmake --install "$srcdir/build"
 }
 
-package_dtkmultimedia-git() {
+package_dtkmultimedia() {
     pkgdesc='Development Tool Kit Multimedia - Core multimedia and widgets libraries (git)'
-    provides=('dtkmultimedia')
-    conflicts=('dtkmultimedia')
+    provides=("dtkmultimedia-git=$pkgver")
+    conflicts=('dtkmultimedia-git')
+  replaces=('dtkmultimedia-git')
     depends=(
         'qt6-base'
         'qt6-multimedia'
@@ -155,10 +156,11 @@ package_dtkmultimedia-git() {
     rm -rf "$pkgdir"/usr/share/libdtk6tablerecognizer
 }
 
-package_dtkocr-git() {
+package_dtkocr() {
     pkgdesc='Development Tool Kit OCR - OCR abstraction layer (git)'
-    provides=('dtkocr')
-    conflicts=('dtkocr')
+    provides=("dtkocr-git=$pkgver")
+    conflicts=('dtkocr-git')
+  replaces=('dtkocr-git')
     depends=(
         'qt6-base'
         'ncnn'
@@ -184,13 +186,14 @@ package_dtkocr-git() {
     rm -rf "$pkgdir"/usr/share/libdtk6tablerecognizer
 }
 
-package_dtktablerecognizer-git() {
+package_dtktablerecognizer() {
     pkgdesc='Development Tool Kit Table Recognizer - Table structure detection and recognition (git)'
-    provides=('dtktablerecognizer')
-    conflicts=('dtktablerecognizer')
+    provides=("dtktablerecognizer-git=$pkgver")
+    conflicts=('dtktablerecognizer-git')
+  replaces=('dtktablerecognizer-git')
     depends=(
         'qt6-base'
-        'dtkocr-git'
+        'dtkocr'
         "$_onnxruntime_pkg"
         'opencv'
     )
